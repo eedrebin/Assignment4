@@ -112,6 +112,7 @@ function sample(t) {
   // Fallback timing (no requestVideoFrameCallback) can see the same camera frame twice; skip exact repeats.
   if (!hasRvfc && values.length && sum / 4096 === values[values.length - 1]) return;
   times.push(t); values.push(sum / 4096);
+  if (trial && trial.tA === undefined) trial.tA = t; // the buffer gets trimmed below, so remember when the trial began
   const keep = Math.max(20, 3 * packetSec());
   while (times.length && t - times[0] > keep) { times.shift(); values.shift(); }
 }
@@ -174,10 +175,11 @@ $("trial").onclick = () => {
   }, 500);
 };
 function finishTrial(el) {
-  // Count packets fully transmitted inside the recorded window. Packets repeat every `cycle`
+  process(); // pick up any packet that finished since the last periodic decode
+  // Count packets fully transmitted during the whole trial. Packets repeat every `cycle`
   // seconds, so one detected packet fixes the phase of all of them.
   const cycle = packetSec(), len = packetBits() * preset().T;
-  const tA = times[0], tB = times[times.length - 1];
+  const tA = trial.tA, tB = times[times.length - 1];
   let expected;
   if (trial.pktTimes.length) {
     const ref = trial.pktTimes[0];
