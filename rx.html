@@ -21,7 +21,7 @@
 </style>
 </head>
 <body>
-<div id="view"><video id="video" playsinline muted></video><div id="roi"></div></div>
+<div id="view"><video id="video" playsinline muted autoplay></video><div id="roi"></div></div>
 <div class="box">
   <button id="cam">Start camera</button>
   <button id="lock">Lock exposure</button>
@@ -37,7 +37,7 @@
     Distance (cm) <input id="dist" type="number" value="20">
     Δα <select id="dA"><option>0.1</option><option selected>0.5</option><option>0.2</option><option>0.3</option></select>
     Duration (s) <input id="dur" type="number" value="60">
-    <br><button id="trial">Start trial</button><button id="csv">Download CSV</button><button id="clear">Clear</button>
+    <br><button id="trial">Start trial</button><button id="csv">Download CSV</button><button id="share">Share CSV</button><button id="copy">Copy CSV</button><button id="clear">Clear</button>
     <div class="mono" id="trialStat"></div>
     <table id="tbl"><thead><tr><th>dist</th><th>Δα</th><th>bps</th><th>s</th><th>pkts det/exp</th>
       <th>BER</th><th>rate (bit/s)</th></tr></thead><tbody></tbody></table>
@@ -51,6 +51,7 @@ $("preset").value = "4";
 const video = $("video");
 const grab = document.createElement("canvas"); grab.width = 64; grab.height = 64;
 const gctx = grab.getContext("2d", { willReadFrequently: true });
+const hasRvfc = "requestVideoFrameCallback" in HTMLVideoElement.prototype;
 let track = null, times = [], values = [], seen = [], trial = null;
 let results = JSON.parse(localStorageGet("bfskResults") || "[]");
 
@@ -81,12 +82,17 @@ $("cam").onclick = async () => {
     const s = track.getSettings();
     $("stat").textContent = `Camera on: ${s.width}x${s.height} @ ${s.frameRate || "?"} fps requested`;
     loop();
-  } catch (e) { $("stat").textContent = "Camera error: " + e.message + "\n(The page must be opened over https.)"; }
+  } catch (e) {
+    $("stat").textContent = "Camera error: " + e.message +
+      "\nThe page must be opened over https. On iPhone use Safari and allow camera access" +
+      " (Settings → Safari → Camera → Allow, or tap \"aA\" in the address bar → Website Settings).";
+  }
 };
 
 $("lock").onclick = async () => {
   if (!track) return;
   const caps = track.getCapabilities ? track.getCapabilities() : {};
+  if (!caps.exposureMode) { alert("This browser doesn't allow locking exposure (normal on iPhone). Keep the phone still and the decoder will handle slow brightness drift."); return; }
   const adv = {};
   if (caps.exposureMode?.includes("manual")) adv.exposureMode = "manual";
   if (caps.whiteBalanceMode?.includes("manual")) adv.whiteBalanceMode = "manual";
@@ -103,14 +109,17 @@ function sample(t) {
   let sum = 0;
   for (let i = 0; i < d.length; i += 4) sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
   if (times.length && t <= times[times.length - 1]) return; // duplicate frame
+  // Fallback timing (no requestVideoFrameCallback) can see the same camera frame twice; skip exact repeats.
+  if (!hasRvfc && values.length && sum / 4096 === values[values.length - 1]) return;
   times.push(t); values.push(sum / 4096);
   const keep = Math.max(20, 3 * packetSec());
   while (times.length && t - times[0] > keep) { times.shift(); values.shift(); }
 }
 
 function loop() {
-  if ("requestVideoFrameCallback" in video) {
-    const cb = (now, md) => { sample(md.mediaTime ?? now / 1000); video.requestVideoFrameCallback(cb); };
+  if (hasRvfc) {
+    // captureTime (ms) is Chrome-only; Safari falls back to the callback timestamp.
+    const cb = (now, md) => { sample(md && md.captureTime ? md.captureTime / 1000 : now / 1000); video.requestVideoFrameCallback(cb); };
     video.requestVideoFrameCallback(cb);
   } else {
     const cb = now => { sample(now / 1000); requestAnimationFrame(cb); };
@@ -191,10 +200,27 @@ function render() {
   $("tbl").tBodies[0].innerHTML = results.map(r => `<tr><td>${r.distance_cm}</td><td>${r.delta_alpha}</td><td>${r.preset_bps}</td>
     <td>${r.seconds}</td><td>${r.packets_detected}/${r.packets_expected}</td><td>${r.ber}</td><td>${r.data_rate_bps}</td></tr>`).join("");
 }
+function toCsv() {
+  const cols = Object.keys(results[0]);
+  return [cols.join(",")].concat(results.map(r => cols.map(c => r[c]).join(","))).join("\n");
+}
+// iPhone: Share sheet lets you AirDrop / save to Files / email the CSV to yourself.
+$("share").onclick = async () => {
+  if (!results.length) return;
+  const file = new File([toCsv()], "bfsk_results.csv", { type: "text/csv" });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file], title: "bfsk_results.csv" });
+    else await navigator.share({ title: "bfsk_results.csv", text: toCsv() });
+  } catch (e) { if (e.name !== "AbortError") alert("Share failed: " + e.message + "\nTry Copy CSV instead."); }
+};
+$("copy").onclick = async () => {
+  if (!results.length) return;
+  try { await navigator.clipboard.writeText(toCsv()); alert("CSV copied. Paste it into a note or email and save it as bfsk_results.csv."); }
+  catch { prompt("Copy this CSV text:", toCsv()); }
+};
 $("csv").onclick = () => {
   if (!results.length) return;
-  const cols = Object.keys(results[0]);
-  const csv = [cols.join(",")].concat(results.map(r => cols.map(c => r[c]).join(","))).join("\n");
+  const csv = toCsv();
   const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
   a.download = "bfsk_results.csv"; a.click();
 };

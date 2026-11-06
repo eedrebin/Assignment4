@@ -1,13 +1,13 @@
 # Real-time screen-camera communication using the alpha channel (BFSK)
 
 A laptop screen shows a static picture whose **alpha (opacity)** is modulated over time.
-An Android phone's camera watches the picture and decodes the bits **live in the browser**.
+A phone camera (iPhone or Android) watches the picture and decodes the bits **live in the browser**.
 Inspired by HiLight (Li et al., MobiSys 2015).
 
 | File | Purpose |
 |---|---|
 | `tx.html` | Transmitter: open on the laptop, full screen |
-| `rx.html` | Receiver: open on the Android phone in Chrome |
+| `rx.html` | Receiver: open on the phone (iPhone: Safari, Android: Chrome) |
 | `common.js` | Shared presets, packet framing and the BFSK decoder |
 | `simulate.js` | Offline test: simulated 60 Hz screen to 30 fps camera (`node simulate.js`) |
 | `analyze_results.py` | Plots BER and data rate vs Δα per distance from the receiver's CSV |
@@ -52,7 +52,7 @@ The phone's browser only allows camera access on **https** pages, so host the fi
 2. Go to **Settings → Pages → Build and deployment → Source: Deploy from a branch → `main` / root → Save**.
 3. After about a minute the site is live at `https://<your-username>.github.io/alpha-bfsk/`.
    - Open `tx.html` on the laptop.
-   - Open `rx.html` on the phone in **Chrome**.
+   - Open `rx.html` on the phone: **Safari** on iPhone, **Chrome** on Android.
 
 ## Running it
 
@@ -60,7 +60,7 @@ The phone's browser only allows camera access on **https** pages, so host the fi
 2. **Phone.** Open `rx.html`, press **Start camera** and allow access.
    - Point the phone so the green box sits entirely on the picture.
    - Select the **same preset and mode** as the laptop.
-   - Optionally press **Lock exposure**. Auto-exposure can partly cancel the brightness changes; not every phone supports locking.
+   - Optionally press **Lock exposure**. Auto-exposure can partly cancel the brightness changes; not every phone supports locking. iPhones generally don't, so keep the phone still on a stand.
 3. **Text mode.** Decoded words appear under *Received words*. One word takes one packet duration to arrive; the receiver shows the duration.
 4. **BER mode.** Enter the distance and Δα, set the duration to at least 3 packet lengths (90–120 s is a good default), then press **Start trial**. Hold the phone still, ideally on a stand.
 
@@ -68,7 +68,7 @@ The phone's browser only allows camera access on **https** pages, so host the fi
 
 For each Δα in {0.1, 0.5} and each distance in {20, 40, 80, 120} cm, run one BER trial.
 Repeat at faster presets until the flicker becomes visible to your eye, or until the link fails.
-Press **Download CSV** on the phone, copy the file to the laptop, then run:
+On iPhone, press **Share CSV** (AirDrop it, save it to Files, or email it to yourself) or **Copy CSV**. On Android, press **Download CSV**. Get the file onto the laptop, then run:
 
 ```
 pip install pandas matplotlib
