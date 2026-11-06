@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Receiver – alpha-channel BFSK</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; background: #111; color: #eee; font-size: 15px; }
+  #view { position: relative; width: 100%; max-width: 640px; margin: 0 auto; }
+  video { width: 100%; display: block; background: #000; }
+  #roi { position: absolute; border: 2px solid #0f0; pointer-events: none; }
+  .box { max-width: 640px; margin: 0 auto; padding: 8px 12px; }
+  select, input, button { font-size: 15px; margin: 3px 2px; }
+  input[type=number] { width: 70px; }
+  #plot { width: 100%; height: 90px; background: #000; display: block; }
+  #words { font-size: 28px; font-weight: 600; min-height: 40px; }
+  #words .bad { color: #f77; font-size: 16px; font-weight: 400; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  td, th { border: 1px solid #444; padding: 2px 4px; text-align: right; }
+  .mono { font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="view"><video id="video" playsinline muted></video><div id="roi"></div></div>
+<div class="box">
+  <button id="cam">Start camera</button>
+  <button id="lock">Lock exposure</button>
+  ROI size <input id="roiSize" type="range" min="10" max="90" value="35">
+  <br>
+  <select id="preset"></select>
+  <select id="mode"><option value="text">Text</option><option value="ber">BER test</option></select>
+  <canvas id="plot" width="600" height="90"></canvas>
+  <div class="mono" id="stat">Point the green box at the picture on the screen.</div>
+  <div id="textArea"><h3>Received words</h3><div id="words"></div></div>
+  <div id="berArea" hidden>
+    <h3>BER trial</h3>
+    Distance (cm) <input id="dist" type="number" value="20">
+    Δα <select id="dA"><option>0.1</option><option selected>0.5</option><option>0.2</option><option>0.3</option></select>
+    Duration (s) <input id="dur" type="number" value="60">
+    <br><button id="trial">Start trial</button><button id="csv">Download CSV</button><button id="clear">Clear</button>
+    <div class="mono" id="trialStat"></div>
+    <table id="tbl"><thead><tr><th>dist</th><th>Δα</th><th>bps</th><th>s</th><th>pkts det/exp</th>
+      <th>BER</th><th>rate (bit/s)</th></tr></thead><tbody></tbody></table>
+  </div>
+</div>
+<script src="common.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+for (const [k, p] of Object.entries(BFSK.PRESETS)) $("preset").add(new Option(p.label, k));
+$("preset").value = "4";
+const video = $("video");
+const grab = document.createElement("canvas"); grab.width = 64; grab.height = 64;
+const gctx = grab.getContext("2d", { willReadFrequently: true });
+let track = null, times = [], values = [], seen = [], trial = null;
+let results = JSON.parse(localStorageGet("bfskResults") || "[]");
+
+function localStorageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function localStorageSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
+const preset = () => BFSK.PRESETS[$("preset").value];
+const mode = () => $("mode").value;
+const packetBits = () => mode() === "ber" ? BFSK.PREAMBLE.length + BFSK.BER_BITS : 13 + 8 + 8 * 8 + 8;
+const packetSec = () => (packetBits() + BFSK.GAP_BITS) * preset().T;
+
+$("mode").onchange = () => { $("berArea").hidden = mode() !== "ber"; $("textArea").hidden = mode() === "ber"; resetBuffer(); };
+$("preset").onchange = resetBuffer;
+function resetBuffer() { times = []; values = []; seen = []; }
+
+function placeRoi() {
+  const f = $("roiSize").value / 100, r = $("roi");
+  r.style.left = r.style.top = (50 - f * 50) + "%";
+  r.style.width = r.style.height = f * 100 + "%";
+}
+$("roiSize").oninput = placeRoi; placeRoi();
+
+$("cam").onclick = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: false,
+      video: { facingMode: "environment", width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 } } });
+    video.srcObject = stream; await video.play();
+    track = stream.getVideoTracks()[0];
+    const s = track.getSettings();
+    $("stat").textContent = `Camera on: ${s.width}x${s.height} @ ${s.frameRate || "?"} fps requested`;
+    loop();
+  } catch (e) { $("stat").textContent = "Camera error: " + e.message + "\n(The page must be opened over https.)"; }
+};
+
+$("lock").onclick = async () => {
+  if (!track) return;
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  const adv = {};
+  if (caps.exposureMode?.includes("manual")) adv.exposureMode = "manual";
+  if (caps.whiteBalanceMode?.includes("manual")) adv.whiteBalanceMode = "manual";
+  if (caps.focusMode?.includes("manual")) adv.focusMode = "manual";
+  try { await track.applyConstraints({ advanced: [adv] }); alert("Locked: " + (Object.keys(adv).join(", ") || "nothing supported")); }
+  catch (e) { alert("Could not lock exposure on this phone: " + e.message); }
+};
+
+function sample(t) {
+  const vw = video.videoWidth, vh = video.videoHeight; if (!vw) return;
+  const f = $("roiSize").value / 100, w = vw * f, h = vh * f;
+  gctx.drawImage(video, (vw - w) / 2, (vh - h) / 2, w, h, 0, 0, 64, 64);
+  const d = gctx.getImageData(0, 0, 64, 64).data;
+  let sum = 0;
+  for (let i = 0; i < d.length; i += 4) sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  if (times.length && t <= times[times.length - 1]) return; // duplicate frame
+  times.push(t); values.push(sum / 4096);
+  const keep = Math.max(20, 3 * packetSec());
+  while (times.length && t - times[0] > keep) { times.shift(); values.shift(); }
+}
+
+function loop() {
+  if ("requestVideoFrameCallback" in video) {
+    const cb = (now, md) => { sample(md.mediaTime ?? now / 1000); video.requestVideoFrameCallback(cb); };
+    video.requestVideoFrameCallback(cb);
+  } else {
+    const cb = now => { sample(now / 1000); requestAnimationFrame(cb); };
+    requestAnimationFrame(cb);
+  }
+  setInterval(process, 400);
+}
+
+function process() {
+  if (times.length < 30) return;
+  const p = preset(), r = BFSK.decode(times, values, p, mode());
+  drawPlot();
+  const warn = r.fps < 2 * p.f1 + 2 ? `  ⚠ camera fps too low for f1=${p.f1} Hz; pick a slower preset` : "";
+  const recent = values.slice(-90), amp = Math.max(...recent) - Math.min(...recent);
+  $("stat").textContent = `camera ≈ ${r.fps.toFixed(1)} fps${warn}\nbrightness ${values[values.length - 1].toFixed(1)}, swing ${amp.toFixed(1)} (last ~3 s)\n` +
+    `packet ≈ ${packetSec().toFixed(1)} s` + (mode() === "text" ? " for an 8-letter word" : "");
+  for (const pkt of r.packets) {
+    if (seen.some(t => Math.abs(t - pkt.time) < 0.5 * packetSec())) continue;
+    seen.push(pkt.time);
+    if (pkt.type === "text") {
+      const div = document.createElement("div");
+      if (pkt.ok) div.textContent = pkt.text;
+      else { div.className = "bad"; div.textContent = `(checksum failed: "${pkt.text}")`; }
+      $("words").prepend(div);
+    } else if (trial) {
+      trial.detected++; trial.correct += pkt.n - pkt.errors; trial.pktTimes.push(pkt.time);
+    }
+  }
+}
+
+function drawPlot() {
+  const c = $("plot"), g = c.getContext("2d");
+  g.fillStyle = "#000"; g.fillRect(0, 0, c.width, c.height);
+  const tEnd = times[times.length - 1], i0 = times.findIndex(t => t > tEnd - 5);
+  const v = values.slice(i0), tt = times.slice(i0);
+  const lo = Math.min(...v), hi = Math.max(...v) + 1e-6;
+  g.strokeStyle = "#4cf"; g.beginPath();
+  v.forEach((y, i) => { const x = (tt[i] - (tEnd - 5)) / 5 * c.width, yy = c.height - (y - lo) / (hi - lo) * c.height;
+    i ? g.lineTo(x, yy) : g.moveTo(x, yy); });
+  g.stroke();
+}
+
+// ---- BER trials: BER = 1 - correct/transmitted; rate = correct bits per second ----
+$("trial").onclick = () => {
+  resetBuffer();
+  trial = { start: performance.now(), detected: 0, correct: 0, pktTimes: [], dist: +$("dist").value, dA: +$("dA").value,
+            bps: $("preset").value, dur: +$("dur").value };
+  const tick = setInterval(() => {
+    const el = (performance.now() - trial.start) / 1000;
+    $("trialStat").textContent = `running ${el.toFixed(0)}/${trial.dur} s, packets detected ${trial.detected}`;
+    if (el >= trial.dur) { clearInterval(tick); finishTrial(el); }
+  }, 500);
+};
+function finishTrial(el) {
+  // Count packets fully transmitted inside the recorded window. Packets repeat every `cycle`
+  // seconds, so one detected packet fixes the phase of all of them.
+  const cycle = packetSec(), len = packetBits() * preset().T;
+  const tA = times[0], tB = times[times.length - 1];
+  let expected;
+  if (trial.pktTimes.length) {
+    const ref = trial.pktTimes[0];
+    const kMin = Math.ceil((tA - ref) / cycle - 1e-6), kMax = Math.floor((tB - len - ref) / cycle + 1e-6);
+    expected = Math.max(trial.detected, kMax - kMin + 1);
+  } else {
+    expected = Math.max(0, Math.floor((tB - tA - len) / cycle) + 1);
+  }
+  const sent = expected * BFSK.BER_BITS;
+  const row = { time: new Date().toISOString(), distance_cm: trial.dist, delta_alpha: trial.dA, preset_bps: trial.bps,
+    seconds: +el.toFixed(1), packets_expected: expected, packets_detected: trial.detected,
+    bits_transmitted: sent, bits_correct: trial.correct,
+    ber: sent ? +(1 - trial.correct / sent).toFixed(4) : 1, data_rate_bps: expected ? +(trial.correct / (expected * cycle)).toFixed(3) : 0,
+    raw_bit_rate_bps: +(1 / preset().T).toFixed(2),
+    camera_fps: +((times.length - 1) / (times[times.length - 1] - times[0]) || 0).toFixed(1) };
+  results.push(row); localStorageSet("bfskResults", JSON.stringify(results)); trial = null; render();
+  $("trialStat").textContent = `done: BER ${row.ber}, ${row.data_rate_bps} bit/s`;
+}
+function render() {
+  $("tbl").tBodies[0].innerHTML = results.map(r => `<tr><td>${r.distance_cm}</td><td>${r.delta_alpha}</td><td>${r.preset_bps}</td>
+    <td>${r.seconds}</td><td>${r.packets_detected}/${r.packets_expected}</td><td>${r.ber}</td><td>${r.data_rate_bps}</td></tr>`).join("");
+}
+$("csv").onclick = () => {
+  if (!results.length) return;
+  const cols = Object.keys(results[0]);
+  const csv = [cols.join(",")].concat(results.map(r => cols.map(c => r[c]).join(","))).join("\n");
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  a.download = "bfsk_results.csv"; a.click();
+};
+$("clear").onclick = () => { if (confirm("Delete all logged trials?")) { results = []; localStorageSet("bfskResults", "[]"); render(); } };
+render();
+</script>
+</body>
+</html>
